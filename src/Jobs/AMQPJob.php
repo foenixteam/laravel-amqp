@@ -7,6 +7,7 @@ use Illuminate\Contracts\Queue\Queue as QueueContract;
 use Illuminate\Queue\Jobs\Job;
 use PhpAmqpLib\Channel\AMQPChannel;
 use PhpAmqpLib\Message\AMQPMessage;
+use Exception;
 
 /**
  * Job class for AMPQ jobs
@@ -59,29 +60,29 @@ class AMQPJob extends Job implements \Illuminate\Contracts\Queue\Job
      * @param  int $delay
      *
      * @return void
+	 *
+	 * * @throws Exception
      */
     public function release($delay = 0)
     {
-        $this->delete();
+		$this->delete();
 
-        $body = $this->amqpMessage->body;
-        $body = json_decode($body, true);
+		$body = $this->amqpMessage->body;
+		$body = json_decode($body, true);
+		/** @var IAMQPJobBase $job */
+		$job = unserialize($body['data']['command']);
+		if ($job instanceof IAMQPJobBase != true)
+			throw new Exception("JOB IS NOT AN AMQP JOB");
 
-        $attempts = $this->attempts();
+		$job->setAttempts($job->getAttempts() + 1);
 
-        // write attempts to body
-        $body['data']['attempts'] = $attempts + 1;
-
-        $job = $body['job'];
-        $data = $body['data'];
-
-        /** @var QueueContract $queue */
-        $queue = $this->container['queue']->connection();
-        if ($delay > 0) {
-            $queue->later($delay, $job, $data, $this->getQueue());
-        } else {
-            $queue->push($job, $data, $this->getQueue());
-        }
+		/** @var QueueContract $queue */
+		$queue = $this->container['queue']->connection();
+		if ($delay > 0) {
+			$queue->later($delay, $job, null, $this->getQueue());
+		} else {
+			$queue->push($job, null, $this->getQueue());
+		}
     }
 
     /**
@@ -99,12 +100,18 @@ class AMQPJob extends Job implements \Illuminate\Contracts\Queue\Job
      * Get the number of times the job has been attempted.
      *
      * @return int
+	 *
+	 * @throws Exception
      */
     public function attempts()
     {
-        $body = json_decode($this->amqpMessage->body, true);
+		$body = json_decode($this->amqpMessage->body, true);
+		/** @var IAMQPJobBase $job */
+		$job = unserialize($body['data']['command']);
+		if ($job instanceof IAMQPJobBase != true)
+			throw new Exception("JOB IS NOT AN AMQP JOB");
 
-        return isset($body['data']['attempts']) ? $body['data']['attempts'] : 0;
+		return $job->getAttempts();
     }
 
     /**

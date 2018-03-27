@@ -4,6 +4,7 @@ namespace Forumhouse\LaravelAmqp\Queue;
 
 use Forumhouse\LaravelAmqp\Exception\AMQPException;
 use Forumhouse\LaravelAmqp\Jobs\AMQPJob;
+use Forumhouse\LaravelAmqp\Jobs\IAMQPJobBase;
 use Forumhouse\LaravelAmqp\Utility\ArrayUtil;
 use Illuminate\Contracts\Queue\Queue as QueueContract;
 use Illuminate\Queue\Queue;
@@ -137,23 +138,45 @@ class AMQPQueue extends Queue implements QueueContract
     /**
      * Push a new job onto the queue.
      *
-     * @param  string $job   Job implementation class name
-     * @param  mixed  $data  Job custom data. Usually array
-     * @param  string $queue Queue name, if different from the default one
+     * @param  IAMQPJobBase $job   	Job implementation class name
+     * @param  mixed  		$data  	Job custom data. Usually array
+     * @param  string 		$queue 	Queue name, if different from the default one
      *
      * @throws \Illuminate\Queue\InvalidPayloadException
      * @throws AMQPException
+	 *
      * @return bool Always true
      */
     public function push($job, $data = '', $queue = null)
     {
-        $queue = $this->prepareQueue($queue);
-        $payload = new AMQPMessage($this->createPayload($job, $data), $this->messageProperties);
-        $this->channel->basic_publish($payload, $this->exchangeName, $this->getRoutingKey($queue));
+		$queue = $this->prepareQueue($queue);
 
-        return true;
+		if ($job->getPriority() > 0)
+		{
+			// SET MESSAGE PRIORITY
+			$props = $this->messageProperties;
+			if (!empty($props['priority']))
+				$defaultPriority = $props['priority'];
+			$props['priority'] = $job->getPriority();
+			$this->setMessageProperties($props);
+
+			// DISPATCH JOB
+			$payload = new AMQPMessage($this->createPayload($job, $data), $this->messageProperties);
+			$this->channel->basic_publish($payload, $this->exchangeName, $this->getRoutingKey($queue));
+
+			// REVERT QUEUE-PROPERTIES
+			if (!empty($defaultPriority))
+				$props['priority'] = $defaultPriority;
+			$this->setMessageProperties($props);
+		}
+		else
+		{
+			$payload = new AMQPMessage($this->createPayload($job, $data), $this->messageProperties);
+			$this->channel->basic_publish($payload, $this->exchangeName, $this->getRoutingKey($queue));
+		}
+
+		return true;
     }
-
 
     /**
      * Adds the message to internal buffer to be sent later in a batch
@@ -258,7 +281,9 @@ class AMQPQueue extends Queue implements QueueContract
         return empty($this->queueFlags['routing_key']) ? $queue : $this->queueFlags['routing_key'];
     }
 
-    /**
+	// TODO: IMPLEMENT PRIORITY HERE
+
+	/**
      * Push a raw payload onto the queue.
      *
      * @param  string $payload Job payload
@@ -410,4 +435,29 @@ class AMQPQueue extends Queue implements QueueContract
 
         return $queue;
     }
+
+
+	// FNX EXTENDED WITH ATTEMPTS / PRIORITY AS PART OF THE PAYLOAD
+	/**
+	 * Create a payload for an object-based queue handler.
+	 *
+	 * @param  mixed  $job
+	 * @return array
+	 */
+	protected function createObjectPayload($job)
+	{
+		return [
+			'data' => [
+				'command' => serialize(clone $job),
+				'commandName' => get_class($job),
+			],
+			'displayName' => $this->getDisplayName($job),
+			'job' => 'Illuminate\Queue\CallQueuedHandler@call',
+			'maxTries' 	=> $job->tries ? $job->tries : null,
+			'timeout' 	=> $job->timeout ? $job->timeout : null,
+			'timeoutAt' => $this->getJobExpiration($job),
+			'attempts' 	=> $job->getAttempts() ? $job->getAttempts() : 0,
+			'priority' 	=> $job->getPriority() ? $job->getPriority() : null,
+		];
+	}
 }
